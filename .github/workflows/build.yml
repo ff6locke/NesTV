@@ -1,27 +1,40 @@
-name: Build APK
+name: Unzip and Build APK
+
 on:
   push:
-    branches: [ main, master ]
+    branches: [ "main" ]
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Unzip project
-        run: unzip -q -o NesTV.zip -d project
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
-      - name: Build
-        run: |
-          DIR=$(dirname "$(find project -name settings.gradle.kts | head -1)")
-          gradle -p "$DIR" assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
-        with:
-          name: NesTV-debug-apk
-          path: project/**/build/outputs/apk/debug/app-debug.apk
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Extract Project ZIP
+      # This extracts project.zip into the current directory. 
+      # Change 'project.zip' if your file has a different name.
+      run: unzip SNESPocket-Android-Project.zip -d . 
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+
+    - name: Grant Execute Permission to Gradlew
+      run: chmod +x gradlew
+
+    - name: Build Debug APK
+      run: ./gradlew assembleDebug
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: debug-apk
+        path: "**/build/outputs/apk/debug/*.apk" # Wildcard helps locate the APK if it was inside a folder in the zip
