@@ -1,46 +1,79 @@
-name: Build NesTV APK
+name: Build NesTV APK from ZIP
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
-  pull_request:
-    branches:
-      - main
-      - master
+    paths:
+      - 'NesTV.zip'
+      - '.github/workflows/build.yml'
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
+      - name: Check ZIP file
+        run: |
+          if [ ! -f NesTV.zip ]; then
+            echo "::error::NesTV.zip not found in the repository root."
+            exit 1
+          fi
 
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
+      - name: Extract ZIP
+        run: |
+          mkdir -p extracted
+          unzip -q NesTV.zip -d extracted
+          echo "ZIP extracted successfully."
+          find extracted -maxdepth 4 -type f | head -100
+
+      - name: Find Gradle project
+        id: project
+        shell: bash
+        run: |
+          set -e
+
+          SETTINGS=$(find extracted -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -print -quit)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::No settings.gradle or settings.gradle.kts found inside ZIP."
+            echo "The ZIP may not contain a standard Android Gradle project."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$SETTINGS")"
+
+          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
+            echo "::error::Gradle wrapper (gradlew) is missing."
+            exit 1
+          fi
+
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Found project: $PROJECT_DIR"
+
+      - name: Build APK
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: NesTV-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
