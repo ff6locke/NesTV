@@ -1,71 +1,135 @@
-name: Build NesTV APK from ZIP
+name: Build SNES Pocket Android APK
 
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
-      - 'NesTV.zip'
-      - '.github/workflows/build.yml'
-
-permissions:
-  contents: read
+      - "*.zip"
+      - ".github/workflows/build.yml"
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Extract Android project
+        run: |
+          set -e
+          ZIP_FILE=$(ls -1 *.zip | head -n 1)
+          echo "Extracting $ZIP_FILE"
+          unzip -o "$ZIP_FILE" -d extracted
+          PROJECT_DIR=$(find extracted -maxdepth 3 -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" \) -printf '%h\n' | head -n 1)
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: No Gradle settings file found in extracted zip"
+            exit 1
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Detected project directory: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
 
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Install Gradle
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: "8.9"
 
-      - name: Extract ZIP
-        shell: bash
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+
+      - name: Patch Gradle JVM targets
         run: |
           set -e
-          test -f NesTV.zip
-          mkdir -p extracted
-          unzip -oq NesTV.zip -d extracted
-          echo "ZIP extracted successfully"
+          if [ -f app/build.gradle.kts ]; then
+            FILE=app/build.gradle.kts
+            python3 - "$FILE" <<'PY'
+          import re, sys
+          path = sys.argv[1]
+          src = open(path).read()
 
-      - name: Find Android project
-        id: project
-        shell: bash
-        run: |
-          set -e
-          SETTINGS="$(find extracted -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
+          # Strip existing compileOptions / kotlinOptions blocks
+          src = re.sub(r'\n\s*compileOptions\s*\{[^}]*\}', '', src, flags=re.S)
+          src = re.sub(r'\n\s*kotlinOptions\s*\{[^}]*\}', '', src, flags=re.S)
 
-          if [ -z "$SETTINGS" ]; then
-            echo "No Gradle settings file found in ZIP."
-            find extracted -maxdepth 4 -type f | head -200
+          inject = '''
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          '''
+
+          m = re.search(r'android\s*\{', src)
+          if not m:
+              print("ERROR: no android { block", file=sys.stderr)
+              sys.exit(1)
+          src = src[:m.end()] + inject + src[m.end():]
+          open(path, 'w').write(src)
+          print("Patched", path)
+          PY
+          else
+            echo "ERROR: app/build.gradle.kts not found"
             exit 1
           fi
+        working-directory: ${{ env.PROJECT_DIR }}
 
-          PROJECT_DIR="$(dirname "$SETTINGS")"
-          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Found project: $PROJECT_DIR"
-
-      - name: Build APK
-        shell: bash
-        working-directory: ${{ steps.project.outputs.dir }}
+      - name: Patch InputMap.kt JVM clash
         run: |
           set -e
-          gradle assembleDebug --no-daemon
+          FILE=app/src/main/java/com/nestv/InputMap.kt
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: $FILE not found"
+            exit 1
+          fi
+          python3 - "$FILE" <<'PY'
+          import re, sys
+          path = sys.argv[1]
+          src = open(path).read()
+
+          # Ensure JvmName import exists
+          if 'import kotlin.jvm.JvmName' not in src:
+              m = re.search(r'^package\s+\S+\s*$', src, flags=re.M)
+              if m:
+                  src = src[:m.end()] + '\nimport kotlin.jvm.JvmName\n' + src[m.end():]
+              else:
+                  src = 'import kotlin.jvm.JvmName\n' + src
+
+          # Annotate the hand-written setAssist(on: Boolean) function
+          pattern = re.compile(r'(\n\s*)(fun\s+setAssist\s*\(\s*on\s*:\s*Boolean\s*\))')
+          new_src, n = pattern.subn(r'\1@JvmName("applyAssist")\1\2', src)
+          if n == 0:
+              print("WARNING: hand-written setAssist(on: Boolean) not found", file=sys.stderr)
+          else:
+              print(f"Annotated {n} setAssist definition(s)")
+          open(path, 'w').write(new_src)
+          PY
+          echo "----- patched file around setAssist -----"
+          grep -n -A2 -B1 'applyAssist\|setAssist' "$FILE" | head -40 || true
+        working-directory: ${{ env.PROJECT_DIR }}
+
+      - name: Write local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+        working-directory: ${{ env.PROJECT_DIR }}
+
+      - name: Build debug APK
+        run: gradle assembleDebug
+        working-directory: ${{ env.PROJECT_DIR }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: NesTV-APK
-          path: extracted/**/build/outputs/apk/debug/*.apk
+          name: SNES-Pocket-Android-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 14
